@@ -1,13 +1,17 @@
 # -*- coding: utf-8 -*-
 
+import abc
 import operator
 from functools import partial, reduce
-from typing import Callable, List, Mapping, TypeVar, Union
+from typing import Callable, Generic, List, Mapping, TypeVar, Union, cast
 
 from typing_extensions import Protocol
 
 T1 = TypeVar('T1')
 T2 = TypeVar('T2')
+T3 = TypeVar('T3')
+T_co = TypeVar('T_co', covariant=True)
+T_contra = TypeVar('T_contra', contravariant=True)
 
 _Number = Union[int, float, complex]
 
@@ -129,7 +133,168 @@ class _MathExpression(object):  # noqa: WPS214
         return self
 
 
-class _Callable(object):  # noqa: WPS214
+class _SupportsAnd(Protocol[T_contra, T_co]):
+    def __and__(self, other: T_contra) -> T_co:  # pragma: no cover
+        ...  # noqa: WPS428
+
+
+class _SupportsRAnd(Protocol[T_contra, T_co]):
+    def __rand__(self, other: T_contra) -> T_co:  # pragma: no cover
+        ...  # noqa: WPS428
+
+
+class _SupportsOr(Protocol[T_contra, T_co]):
+    def __or__(self, other: T_contra) -> T_co:  # pragma: no cover
+        ...  # noqa: WPS428
+
+
+class _SupportsROr(Protocol[T_contra, T_co]):
+    def __ror__(self, other: T_contra) -> T_co:  # pragma: no cover
+        ...  # noqa: WPS428
+
+
+class _Operation(Generic[T1, T2]):
+    """A unary operation."""
+
+    @abc.abstractmethod
+    def __call__(self, __arg: T1) -> T2:  # noqa: WPS112
+        """Apply the operation to a given input."""
+
+    @property
+    @abc.abstractmethod
+    def precedence(self) -> int:
+        """Precedence of the operation where 0 is the highest precedence.
+
+        According to:
+        docs.python.org/3/reference/expressions.html#operator-precedence
+        """
+
+    def as_string(self, inner: str) -> str:
+        """Construct a visual representation of the operation."""
+
+
+class _SomethingAnd(_Operation[T1, T2]):
+    """The operation `<operand> & <argument>`."""
+
+    precedence = 8
+
+    def __init__(self, operand: _SupportsAnd[T1, T2]) -> None:
+        self.operand = operand
+
+    def __call__(self, __arg: T1) -> T2:  # noqa: WPS112
+        return self.operand & __arg
+
+    def as_string(self, inner: str) -> str:
+        return '{0.operand!r} & {1}'.format(self, inner)
+
+
+class _AndSomething(_Operation[T1, T2]):
+    """The operation `<argument> & <operand>`."""
+
+    precedence = 8
+
+    def __init__(self, operand: _SupportsRAnd[T1, T2]) -> None:
+        self.operand = operand
+
+    def __call__(self, __arg: T1) -> T2:  # noqa: WPS112
+        return __arg & self.operand
+
+    def as_string(self, inner: str) -> str:
+        return '{0} & {1.operand!r}'.format(inner, self)
+
+
+class _SomethingOr(_Operation[T1, T2]):
+    """The operation `<operand> | <argument>`."""
+
+    precedence = 10
+
+    def __init__(self, operand: _SupportsOr[T1, T2]) -> None:
+        self.operand = operand
+
+    def __call__(self, __arg: T1) -> T2:  # noqa: WPS112
+        return self.operand | __arg
+
+    def as_string(self, inner: str) -> str:
+        return '{0.operand!r} | {1}'.format(self, inner)
+
+
+class _OrSomething(_Operation[T1, T2]):
+    """The operation `<argument> | <operand>`."""
+
+    precedence = 10
+
+    def __init__(self, operand: _SupportsROr[T1, T2]) -> None:
+        self.operand = operand
+
+    def __call__(self, __arg: T1) -> T2:  # noqa: WPS112
+        return __arg | self.operand
+
+    def as_string(self, inner: str) -> str:
+        return '{0} | {1.operand!r}'.format(inner, self)
+
+
+class _Expression(Generic[T1, T2]):
+
+    @abc.abstractmethod
+    def __call__(self, __arg: T1) -> T2:  # noqa: WPS112
+        """Apply the expression to a given input."""
+
+    # dunder naming so it doesn't conflict with __getattr__ behavior
+    @abc.abstractmethod
+    def __precedence__(self) -> int:
+        """The precedence of this expression (0=highest)."""
+
+    def __and__(self, other: _SupportsRAnd[T2, T3]) -> '_Expression[T1, T3]':
+        return _Chain(self, _AndSomething(other))
+
+    # mypy warns that this method and the matching magic method of its argument
+    # overlap. We do handle this correctly, but mypy cannot infer this.
+    def __rand__(  # type: ignore[misc]
+        self, other: _SupportsAnd[T2, T3],
+    ) -> '_Expression[T1, T3]':
+        return _Chain(self, _SomethingAnd(other))
+
+    def __or__(self, other: _SupportsROr[T2, T3]) -> '_Expression[T1, T3]':
+        return _Chain(self, _OrSomething(other))
+
+    # mypy warns that this method and the matching magic method of its argument
+    # overlap. We do handle this correctly, but mypy cannot infer this.
+    def __ror__(  # type: ignore[misc]
+        self, other: _SupportsOr[T2, T3],
+    ) -> '_Expression[T1, T3]':
+        return _Chain(self, _SomethingOr(other))
+
+    # TODO: add all magic methods from _Callable here
+
+
+class _Chain(Generic[T1, T2, T3], _Expression[T1, T3]):
+    # Dunder naming is ugly, but it's the only way to prevent
+    # conflicts with __getattr__ behavior
+    __previous__: _Expression[T1, T2]
+    __operation__: _Operation[T2, T3]
+
+    def __init__(
+        self, previous: _Expression[T1, T2], operation: _Operation[T2, T3],
+    ) -> None:
+        self.__previous__ = previous
+        self.__operation__ = operation
+
+    def __call__(self, __arg: T1) -> T3:  # noqa: WPS112
+        return self.__operation__(self.__previous__(__arg))
+
+    def __repr__(self) -> str:
+        return self.__operation__.as_string(
+            repr(self.__previous__)
+            if self.__previous__.__precedence__()  # noqa: WPS609
+            <= self.__operation__.precedence  # noqa: W503
+            else '({0!r})'.format(self.__previous__),
+        )
+
+    def __precedence__(self) -> int:
+        return self.__operation__.precedence
+
+
+class _Callable(_Expression[T1, T1]):  # noqa: WPS214
     """
     Short lambda implementation.
 
@@ -145,15 +310,52 @@ class _Callable(object):  # noqa: WPS214
 
     """
 
+    def __call__(self, __arg: T2) -> T2:  # noqa: WPS112
+        return __arg
+
+    def __and__(self, other: _SupportsRAnd[T2, T3]) -> '_Expression[T2, T3]':
+        return super(  # noqa: WPS608
+            _Callable, cast(_Callable[T2], self),
+        ).__and__(other)
+
+    # mypy warns that this method and the matching magic method of its argument
+    # overlap. We do handle this correctly, but mypy cannot infer this.
+    def __rand__(  # type: ignore[misc]
+        self, other: _SupportsAnd[T2, T3],
+    ) -> '_Expression[T2, T3]':
+        return super(  # noqa: WPS608
+            _Callable, cast(_Callable[T2], self),
+        ).__rand__(other)
+
+    def __or__(self, other: _SupportsROr[T2, T3]) -> '_Expression[T2, T3]':
+        return super(  # noqa: WPS608
+            _Callable, cast(_Callable[T2], self),
+        ).__or__(other)
+
+    # mypy warns that this method and the matching magic method of its argument
+    # overlap. We do handle this correctly, but mypy cannot infer this.
+    def __ror__(  # type: ignore[misc]
+        self, other: _SupportsOr[T2, T3],
+    ) -> '_Expression[T2, T3]':
+        return super(  # noqa: WPS608
+            _Callable, cast(_Callable[T2], self),
+        ).__ror__(other)
+
+    def __repr__(self) -> str:
+        return '_'
+
+    def __precedence__(self) -> int:
+        return 0
+
     def __getattr__(
         self,
         key: str,
-    ) -> Callable[[_LambdaDynamicProtocol[T1]], T1]:
+    ) -> Callable[[_LambdaDynamicProtocol[T2]], T2]:
         return operator.attrgetter(key)
 
     def __getitem__(
-        self, key: T1,
-    ) -> Callable[[Mapping[T1, T2]], T2]:
+        self, key: T2,
+    ) -> Callable[[Mapping[T2, T3]], T3]:
         return operator.itemgetter(key)
 
     def __add__(self, other: _Number) -> _MathExpression:
@@ -198,78 +400,66 @@ class _Callable(object):  # noqa: WPS214
     def __rpow__(self, other: _Number) -> _MathExpression:
         return other ** _MathExpression()
 
-    __and__: Callable[['_Callable', T1], Callable[[T1], T1]] = _fmap(
-        operator.and_,
-    )
-    __or__: Callable[['_Callable', T1], Callable[[T1], T1]] = _fmap(
-        operator.or_,
-    )
-    __xor__: Callable[['_Callable', T1], Callable[[T1], T1]] = _fmap(
+    __xor__: Callable[['_Callable', T1], Callable[[T1], T1]] = _fmap(  # type: ignore  # noqa
         operator.xor,
     )
-    __divmod__: Callable[['_Callable', T1], Callable[[T1], T1]] = _fmap(divmod)
+    __divmod__: Callable[['_Callable', T1], Callable[[T1], T1]] = _fmap(divmod)  # type: ignore  # noqa
 
-    __lshift__: Callable[['_Callable', T1], Callable[[T1], T1]] = _fmap(
+    __lshift__: Callable[['_Callable', T1], Callable[[T1], T1]] = _fmap(  # type: ignore  # noqa
         operator.lshift,
     )
-    __rshift__: Callable[['_Callable', T1], Callable[[T1], T1]] = _fmap(
+    __rshift__: Callable[['_Callable', T1], Callable[[T1], T1]] = _fmap(  # type: ignore  # noqa
         operator.rshift,
     )
 
-    __lt__: Callable[['_Callable', T1], Callable[[T1], T1]] = _fmap(
+    __lt__: Callable[['_Callable', T1], Callable[[T1], T1]] = _fmap(  # type: ignore  # noqa
         operator.lt,
     )
-    __le__: Callable[['_Callable', T1], Callable[[T1], T1]] = _fmap(
+    __le__: Callable[['_Callable', T1], Callable[[T1], T1]] = _fmap(  # type: ignore  # noqa
         operator.le,
     )
-    __gt__: Callable[['_Callable', T1], Callable[[T1], T1]] = _fmap(
+    __gt__: Callable[['_Callable', T1], Callable[[T1], T1]] = _fmap(  # type: ignore  # noqa
         operator.gt,
     )
-    __ge__: Callable[['_Callable', T1], Callable[[T1], T1]] = _fmap(
+    __ge__: Callable[['_Callable', T1], Callable[[T1], T1]] = _fmap(  # type: ignore  # noqa
         operator.ge,
     )
-    __eq__: Callable[
+    __eq__: Callable[  # type: ignore
         ['_Callable', object], Callable[[object], bool],
     ] = _fmap(  # type: ignore
         operator.eq,
     )
-    __ne__: Callable[
+    __ne__: Callable[  # type: ignore
         ['_Callable', object], Callable[[object], bool],
     ] = _fmap(  # type: ignore
         operator.ne,
     )
 
-    __neg__: Callable[['_Callable'], Callable[[T1], T1]] = _unary_fmap(
+    __neg__: Callable[['_Callable'], Callable[[T1], T1]] = _unary_fmap(  # type: ignore  # noqa
         operator.neg,
     )
-    __pos__: Callable[['_Callable'], Callable[[T1], T1]] = _unary_fmap(
+    __pos__: Callable[['_Callable'], Callable[[T1], T1]] = _unary_fmap(  # type: ignore  # noqa
         operator.pos,
     )
-    __invert__: Callable[['_Callable'], Callable[[T1], T1]] = _unary_fmap(
+    __invert__: Callable[['_Callable'], Callable[[T1], T1]] = _unary_fmap(  # type: ignore  # noqa
         operator.invert,
     )
 
-    __rdivmod__: Callable[['_Callable', T1], Callable[[T1], T1]] = _fmap(
+    __rdivmod__: Callable[['_Callable', T1], Callable[[T1], T1]] = _fmap(  # type: ignore  # noqa
         _flip(divmod),
     )
 
-    __rlshift__: Callable[['_Callable', T1], Callable[[T1], T1]] = _fmap(
+    __rlshift__: Callable[['_Callable', T1], Callable[[T1], T1]] = _fmap(  # type: ignore  # noqa
         _flip(operator.lshift),
     )
-    __rrshift__: Callable[['_Callable', T1], Callable[[T1], T1]] = _fmap(
+    __rrshift__: Callable[['_Callable', T1], Callable[[T1], T1]] = _fmap(  # type: ignore  # noqa
         _flip(operator.rshift),
     )
 
-    __rand__: Callable[['_Callable', T1], Callable[[T1], T1]] = _fmap(
-        _flip(operator.and_),
-    )
-    __ror__: Callable[['_Callable', T1], Callable[[T1], T1]] = _fmap(
-        _flip(operator.or_),
-    )
-    __rxor__: Callable[['_Callable', T1], Callable[[T1], T1]] = _fmap(
+    __rxor__: Callable[['_Callable', T1], Callable[[T1], T1]] = _fmap(  # type: ignore  # noqa
         _flip(operator.xor),
     )
 
 
 #: Our main alias for the lambda object:
-_ = _Callable()  # noqa: WPS122
+_ = _Callable()  # type: ignore # noqa: WPS122

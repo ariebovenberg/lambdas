@@ -1,0 +1,92 @@
+- case: expression_empty_chain
+  disable_cache: true
+  main: |
+    from lambdas import _
+
+    reveal_type(_('foo'))  # N: Revealed type is "builtins.str*"
+
+- case: expression_correct_chain
+  disable_cache: true
+  main: |
+    from lambdas import _
+    from typing import List, Iterable
+
+    class Test0:
+        def __or__(self, a: List[str]) -> List[bool]:
+            return list(map(bool, map(int, a)))
+
+
+    class Test1:
+        def __rand__(self, a: int) -> str:
+            return str(a) * 2
+
+
+    class Test2:
+        def __rand__(self, a: str) -> List[str]:
+            return list(a)
+
+
+    class Test3:
+        def __ror__(self, a: Iterable[int]) -> float:
+            return sum(a) / 3
+
+    expr = Test0() | _ & Test1() & Test2() | Test3()
+
+    reveal_type(expr(9))  # N: Revealed type is "builtins.float*"
+
+- case: expression_incorrect_chain
+  disable_cache: true
+  main: |
+    from lambdas import _
+    from typing import List, Iterable
+
+    class Test0:
+        def __or__(self, a: List[str]) -> List[int]:
+            return list(map(int, a))
+
+    class Test1:
+        def __rand__(self, a: int) -> str:
+            return str(a) * 2
+
+
+    class Test2:
+        def __rand__(self, a: str) -> List[str]:
+            return list(a)
+
+
+    class Test3:
+        def __ror__(self, a: Iterable[str]) -> float:
+            return sum(map(int, a)) / 3
+
+    expr = Test0() | _ & Test1() & Test2() | Test3()
+  out: |
+    main:22: error: Unsupported operand types for | ("_Expression[int, List[int]]" and "Test3")
+- case: expression_incorrect_input
+  disable_cache: true
+  main: |
+    from lambdas import _
+    from typing import List
+
+    class Test0:
+        def __or__(self, a: List[str]) -> List[int]:
+            return list(map(int, a))
+
+    class Test1:
+        def __rand__(self, a: int) -> str:
+            return str(a) * 2
+
+
+    class Test2:
+        def __rand__(self, a: str) -> List[str]:
+            return list(a)
+
+
+    class Test3:
+        def __ror__(self, a: List[int]) -> float:
+            return sum(a) / 3
+
+    expr = Test0() | _ & Test1() & Test2() | Test3()
+
+    expr('foo')
+  out: |
+    main:24: error: Argument 1 to "__call__" of "_Expression" has incompatible type "str"; expected "int"
